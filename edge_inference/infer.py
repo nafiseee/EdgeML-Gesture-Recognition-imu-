@@ -1,6 +1,6 @@
 import subprocess, sys, collections
 import numpy as np
-
+import os
 try:
     w = dict(np.load('weights.npz'))
 except Exception as e:
@@ -52,7 +52,6 @@ def predict(window):
     
     probs = softmax(logits)
     
-    # ПЕЧАТАЕМ ВЕРОЯТНОСТИ ВСЕХ ЧЕТЫРЕХ КЛАССОВ (0, 1, 2, 3)
     print(f"\n[DEBUG PROBS] Background:{probs[0]:.3f} | Class1:{probs[1]:.3f} | Class2:{probs[2]:.3f} | Class3:{probs[3]:.3f}")
     
     conf = np.max(probs)
@@ -60,13 +59,15 @@ def predict(window):
     
     return pred, conf
 
+    
+
 def main():
     labels = {1: "TELEGRAM", 2: "SPOTIFY", 3: "CIRCLE"}
     buf = collections.deque(maxlen=300)
     
     print("[INIT] Starting sensor_daemon via root...")
     p = subprocess.Popen(['su', '-c', './sensor_daemon'], stdout=subprocess.PIPE, text=True)
-    print("[WAIT] Ready. Double tap to wake...\n")
+    print("[WAIT] Ready. Perform gesture, THEN press volume down...\n")
     
     collecting = False
     
@@ -76,7 +77,7 @@ def main():
             if not line: continue
             
             if line == ">>> TRIGGER <<<":
-                print("\n[TRIGGER] Tap detected. Reading 1.5s...")
+                print("\n[TRIGGER] Tap detected. Analyzing past 1.5s instantly...")
                 buf.clear()
                 collecting = True
                 continue
@@ -91,22 +92,24 @@ def main():
                         
                 if len(buf) == 300:
                     collecting = False 
-                    sys.stdout.write("\r[INFER] 300/300 points. Calculating... ")
-                    sys.stdout.flush()
                     
                     cls, conf = predict(buf)
                     if cls != 0:
-                        print(f"\n[MATCH] >> {labels[cls]} << (Conf: {conf:.3f})\n")
-                    else:
-                        print(f"\n[IGNORE] Background (Conf: {conf:.3f})\n")
+                        gesture_name = labels[cls]
+                        print(f"[MATCH] >> {gesture_name} << (Conf: {conf:.3f})\n")
                         
-                    print("[WAIT] Ready. Double tap to wake...")
+                        os.system("su -c 'input keyevent 24' > /dev/null 2>&1")
+                        
+                        # 2. Выполняем макрос
+                        os.system(f'am broadcast -a edge.gesture.DETECTED -p com.arlosoft.macrodroid --es "name" "{gesture_name}" > /dev/null 2>&1')
+                    else:
+                        print(f"[IGNORE] Background (Conf: {conf:.3f})\n")
+                        os.system("su -c 'input keyevent 24' > /dev/null 2>&1")
                     
     except KeyboardInterrupt:
         print("\n[EXIT] Terminating...")
     finally:
         p.terminate()
         subprocess.run(['su', '-c', 'killall sensor_daemon'], capture_output=True)
-
 if __name__ == "__main__":
     main()
