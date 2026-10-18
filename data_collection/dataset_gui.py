@@ -3,19 +3,50 @@ import subprocess
 import time
 import csv
 import os
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template_string
 
 app = Flask(__name__)
 current_gesture_id = 0
-CSV_FILE = 'dataset.csv'
 
+# –î–∏–Ω–∞–º–∏—á–µ—Å–∫–∏–µ –ø—É—Ç–∏
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+CSV_FILE = os.path.join(CURRENT_DIR, 'dataset.csv')
+BUTTONS_FILE = os.path.join(CURRENT_DIR, 'buttons.json')
+BIN_PATH = os.path.join(CURRENT_DIR, 'imu_stream')
+
+# –ë–∞–∑–æ–≤—ã–µ –∫–Ω–æ–ø–∫–∏ –ø–æ —É–º–æ–ª—á–∞–Ω–∏—é
+default_buttons = {
+    "0": "Noise",
+    "1": "Telegram",
+    "2": "Spotify",
+    "3": "Circle"
+}
+
+# –ó–∞–≥—Ä—É–∂–∞–µ–º –∫–∞—Å—Ç–æ–º–Ω—ã–µ –∫–Ω–æ–ø–∫–∏
+def load_buttons():
+    buttons = default_buttons.copy()
+    if os.path.isfile(BUTTONS_FILE):
+        with open(BUTTONS_FILE, 'r') as f:
+            custom = json.load(f)
+            buttons.update(custom)
+    return buttons
+
+# –ò–Ω–∏—Ü–∏–∞–ª–∏–∑–∞—Ü–∏—è id –∂–µ—Å—Ç–æ–≤ –∏–∑ csv
 if os.path.isfile(CSV_FILE):
     with open(CSV_FILE, 'r') as f:
-        lines = f.readlines()[1:] 
-        if lines:
-            last_line = lines[-1].strip().split(',')
-            if len(last_line) >= 8:
-                current_gesture_id = int(last_line[7])
+        reader = csv.reader(f)
+        next(reader, None)
+        max_id = 0
+        for row in reader:
+            if len(row) >= 8:
+                try:
+                    # –ò–Ω–¥–µ–∫—Å 7 - —ç—Ç–æ gesture_id
+                    gid = int(float(row[7]))
+                    if gid > max_id:
+                        max_id = gid
+                except ValueError:
+                    pass
+        current_gesture_id = max_id
 
 HTML_UI = """
 <!DOCTYPE html>
@@ -25,42 +56,122 @@ HTML_UI = """
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         body { background: #111; color: white; font-family: sans-serif; text-align: center; padding-top: 10px; margin: 0; }
-        .btn { width: 90%; height: 60px; font-size: 18px; margin: 6px; border-radius: 12px; border: none; font-weight: bold; }
-        .btn-tg { background: #3498db; color: white; }
-        .btn-sp { background: #1db954; color: white; }
-        .btn-cr { background: #f39c12; color: white; }
-        .btn-noise { background: #576574; color: white; }
+        .btn { width: 90%; height: 50px; font-size: 16px; margin: 5px; border-radius: 12px; border: none; font-weight: bold; cursor: pointer; }
+        .btn-record { background: #3498db; color: white; }
         .btn-save { background: #1e90ff; color: white; width: 40%; }
         .btn-cancel { background: #ff6b81; color: white; width: 40%; }
+        .btn-add { background: #9b59b6; color: white; height: 40px; font-size: 14px;}
         
-        #status { font-size: 18px; margin: 15px; color: #eccc68; min-height: 25px; }
-        #review-panel { display: none; margin-top: 15px; padding: 10px; background: #222; border-radius: 15px; }
+        input { height: 35px; font-size: 16px; text-align: center; border-radius: 8px; border: none; margin: 5px; }
+        .inp-id { width: 20%; }
+        .inp-name { width: 50%; }
+
+        #status { font-size: 18px; margin: 10px; color: #eccc68; min-height: 25px; }
+        #review-panel { display: none; margin-top: 10px; padding: 10px; background: #222; border-radius: 15px; }
         #controls { display: block; }
-        canvas { max-width: 100%; height: 300px !important; }
+        .panel { margin: 15px auto; padding: 15px; background: #222; border-radius: 12px; width: 90%; }
+        
+        .stats-box { font-size: 14px; text-align: left; background: #333; padding: 10px; border-radius: 8px; font-family: monospace; }
+        canvas { max-width: 100%; height: 250px !important; }
     </style>
 </head>
 <body>
-    <h2>ë°Æ‡È®™ ¶•·‚Æ¢ 6DoF (Acc + Gyro)</h2>
-    <div id="status">ç†¶¨® ™≠ÆØ™„. ç†Á≠Ò‚·Ô ß†Ø®·Ï:</div>
+    <h2>6DoF Collector</h2>
+    <div id="status">Ready.</div>
     
     <div id="controls">
-        <button class="btn btn-tg" onclick="record(1)">(Telegram)</button>
-        <button class="btn btn-sp" onclick="record(2)">(Spotify)</button>
-        <button class="btn btn-cr" onclick="record(3)">(Circle)</button>
-        <button class="btn btn-noise" onclick="record(0)">ò„¨ (noise)</button>
+        <div class="panel">
+            <h3 style="margin-top:0;">Record Data</h3>
+            <div id="buttons-container">
+                <!-- Dynamically populated buttons -->
+            </div>
+        </div>
+
+        <div class="panel">
+            <h3 style="margin-top:0;">Dataset Stats</h3>
+            <div class="stats-box" id="stats-box">Loading...</div>
+        </div>
+
+        <div class="panel">
+            <h3 style="margin-top:0;">Add New Button</h3>
+            <input type="number" id="new-id" class="inp-id" placeholder="ID (e.g. 4)">
+            <input type="text" id="new-name" class="inp-name" placeholder="Name (e.g. Triangle)">
+            <br>
+            <button class="btn btn-add" onclick="addNewButton()">Create Button</button>
+        </div>
     </div>
 
     <div id="review-panel">
         <canvas id="chart"></canvas>
         <br>
-        <button class="btn btn-cancel" onclick="cancel()">é‚¨•≠®‚Ï ß†Ø®·Ï</button>
-        <button class="btn btn-save" onclick="save()">ëÆÂ‡†≠®‚Ï ¶•·‚</button>
+        <button class="btn btn-cancel" onclick="cancel()">Cancel</button>
+        <button class="btn btn-save" onclick="save()">Save Data</button>
     </div>
 
     <script>
         let currentData = null;
         let chartInstance = null;
         const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+        // –ó–∞–≥—Ä—É–∑–∫–∞ –∫–Ω–æ–ø–æ–∫ –∏ —Å—Ç–∞—Ç–∏—Å—Ç–∏–∫–∏ –ø—Ä–∏ —Å—Ç–∞—Ä—Ç–µ
+        window.onload = () => {
+            fetchButtons();
+            fetchStats();
+        };
+
+        function fetchButtons() {
+            fetch('/buttons')
+                .then(r => r.json())
+                .then(buttons => {
+                    const container = document.getElementById('buttons-container');
+                    container.innerHTML = '';
+                    for (const [id, name] of Object.entries(buttons)) {
+                        let btn = document.createElement('button');
+                        btn.className = 'btn btn-record';
+                        btn.innerText = `${name} (${id})`;
+                        btn.onclick = () => record(id);
+                        container.appendChild(btn);
+                    }
+                });
+        }
+
+        function fetchStats() {
+            fetch('/stats')
+                .then(r => r.json())
+                .then(stats => {
+                    const box = document.getElementById('stats-box');
+                    if (Object.keys(stats).length === 0) {
+                        box.innerHTML = "Dataset is empty.";
+                        return;
+                    }
+                    let html = "";
+                    let total = 0;
+                    for (const [name, count] of Object.entries(stats)) {
+                        html += `‚Ä¢ ${name}: <b>${count}</b> samples<br>`;
+                        total += count;
+                    }
+                    html += `<hr style="border-color:#555">Total samples: <b>${total}</b>`;
+                    box.innerHTML = html;
+                });
+        }
+
+        function addNewButton() {
+            const id = document.getElementById('new-id').value;
+            const name = document.getElementById('new-name').value;
+            if (!id || !name) {
+                alert("Provide both ID and Name.");
+                return;
+            }
+            fetch('/add_button', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id: id, name: name})
+            }).then(() => {
+                document.getElementById('new-id').value = '';
+                document.getElementById('new-name').value = '';
+                fetchButtons();
+            });
+        }
 
         function beep(freq, duration) {
             if (audioCtx.state === 'suspended') audioCtx.resume();
@@ -81,11 +192,11 @@ HTML_UI = """
             let status = document.getElementById('status');
             document.getElementById('controls').style.display = 'none';
             document.getElementById('review-panel').style.display = 'none';
-            status.innerText = 'è‡®£Æ‚Æ¢Ï·Ô... ß†Ø®·Ï Á•‡•ß 1 ·•™„≠§„...';
+            status.innerText = 'Preparing... recording in 1 sec...';
             
             setTimeout(() => {
                 beep(400, 150);
-                status.innerText = 'á†Ø®·Î¢†Ó 1.5 ·•™„≠§Î! Ñ¢®£†© ‡„™Æ©!';
+                status.innerText = 'Recording 1.5s! MOVE NOW!';
                 
                 fetch('/record/' + label)
                     .then(response => response.json())
@@ -94,17 +205,17 @@ HTML_UI = """
                         setTimeout(() => beep(800, 100), 150);
                         
                         if(data.length === 0) {
-                            status.innerText = 'éË®°™†: ≠• „§†´Æ·Ï ØÆ´„Á®‚Ï §†≠≠Î• · §†‚Á®™Æ¢!';
+                            status.innerText = 'Error: No data from sensor!';
                             document.getElementById('controls').style.display = 'block';
                             return;
                         }
                         currentData = data;
-                        status.innerText = `èÆ´„Á•≠Æ ${data.length} ‚ÆÁ•™. ëÆÂ‡†≠®‚Ï?`;
+                        status.innerText = `Received ${data.length} points. Save?`;
                         document.getElementById('review-panel').style.display = 'block';
                         drawChart(data);
                     })
                     .catch(err => {
-                        status.innerText = 'éË®°™† ·Æ•§®≠•≠®Ô · ·•‡¢•‡Æ¨!';
+                        status.innerText = 'Error: Connection failed!';
                         document.getElementById('controls').style.display = 'block';
                     });
             }, 1000);
@@ -119,11 +230,12 @@ HTML_UI = """
             .then(text => {
                 document.getElementById('status').innerText = text;
                 resetUI();
+                fetchStats(); // Update stats after saving
             });
         }
 
         function cancel() {
-            document.getElementById('status').innerText = 'é‚¨•≠•≠Æ. ç†¶¨® ™≠ÆØ™„ ß†≠Æ¢Æ.';
+            document.getElementById('status').innerText = 'Cancelled. Ready.';
             resetUI();
         }
 
@@ -162,20 +274,67 @@ HTML_UI = """
 def index():
     return HTML_UI
 
+@app.route('/buttons')
+def get_buttons():
+    return jsonify(load_buttons())
+
+@app.route('/add_button', methods=['POST'])
+def add_button():
+    data = request.json
+    btn_id = str(data['id'])
+    btn_name = data['name']
+    
+    # –ß–∏—Ç–∞–µ–º —Å—Ç–∞—Ä—ã–µ
+    buttons = {}
+    if os.path.isfile(BUTTONS_FILE):
+        with open(BUTTONS_FILE, 'r') as f:
+            buttons = json.load(f)
+    
+    # –î–æ–±–∞–≤–ª—è–µ–º –Ω–æ–≤—É—é
+    buttons[btn_id] = btn_name
+    
+    # –°–æ—Ö—Ä–∞–Ω—è–µ–º
+    with open(BUTTONS_FILE, 'w') as f:
+        json.dump(buttons, f)
+        
+    return jsonify({"status": "ok"})
+
+@app.route('/stats')
+def get_stats():
+    if not os.path.isfile(CSV_FILE):
+        return jsonify({})
+        
+    stats = {}
+    buttons = load_buttons()
+    
+    # –ß–∏—Ç–∞–µ–º CSV –∏ —Å—á–∏—Ç–∞–µ–º —É–Ω–∏–∫–∞–ª—å–Ω—ã–µ gesture_id –¥–ª—è –∫–∞–∂–¥–æ–≥–æ label
+    with open(CSV_FILE, 'r') as f:
+        reader = csv.DictReader(f)
+        tracker = {}
+        for row in reader:
+            lbl = row['label']
+            gid = row['gesture_id']
+            if lbl not in tracker:
+                tracker[lbl] = set()
+            tracker[lbl].add(gid)
+            
+    for lbl, gids in tracker.items():
+        name = buttons.get(lbl, f"Unknown ({lbl})")
+        stats[f"{name} [{lbl}]"] = len(gids)
+        
+    return jsonify(stats)
+
 @app.route('/record/<int:label>')
 def record_gesture(label):
-    bin_path = "/data/data/com.termux/files/home/imu_stream"
-    
     process = subprocess.Popen(
-        ['su', '-c', bin_path], 
+        ['su', '-c', BIN_PATH], 
         stdout=subprocess.PIPE, text=True
     )
-    
+
     collected_points = []
     try:
         for line in iter(process.stdout.readline, ''):
             parts = line.split()
-            # é¶®§†•¨ 7 ß≠†Á•≠®©: TS, AX, AY, AZ, GX, GY, GZ
             if len(parts) == 7:
                 try:
                     collected_points.append({
@@ -185,24 +344,24 @@ def record_gesture(label):
                     })
                 except ValueError:
                     pass
-                    
-            if len(collected_points) >= 300: # 1.5 ·•™„≠§Î Ø‡® ~200 ÉÊ
+
+            if len(collected_points) >= 300: 
                 break
     finally:
         process.terminate()
         subprocess.run(['su', '-c', 'killall imu_stream'], capture_output=True)
-        
+
     return jsonify(collected_points)
 
 @app.route('/save', methods=['POST'])
 def save_data():
     global current_gesture_id
     current_gesture_id += 1
-    
+
     data = request.json
     if not data:
-        return "éË®°™†: ≠•‚ §†≠≠ÎÂ", 400
-        
+        return "Error: No data", 400
+
     file_exists = os.path.isfile(CSV_FILE)
     with open(CSV_FILE, 'a', newline='') as f:
         writer = csv.writer(f)
@@ -210,8 +369,8 @@ def save_data():
             writer.writerow(['ax', 'ay', 'az', 'gx', 'gy', 'gz', 'label', 'gesture_id'])
         for p in data:
             writer.writerow([p['ax'], p['ay'], p['az'], p['gx'], p['gy'], p['gz'], p['label'], current_gesture_id])
-            
-    return f"Ü•·‚ #{current_gesture_id} ·ÆÂ‡†≠Ò≠ (6DoF)!"
+
+    return f"Gesture #{current_gesture_id} saved!"
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
