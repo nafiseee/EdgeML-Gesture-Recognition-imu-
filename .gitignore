@@ -1,5 +1,12 @@
 .vscode/
 .idea/
-magnet
-dataset_mobile_CLEAN.csv
-dataset_AUGMENTED.csv
+.DS_Store
+
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+daemon/sensor_daemon
+datasets/noise_dataset.csv
+outputs/*.pth
+training/gallery.html

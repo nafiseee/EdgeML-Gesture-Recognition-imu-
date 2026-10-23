@@ -8,27 +8,29 @@ from flask import Flask, request, jsonify, render_template_string
 app = Flask(__name__)
 current_gesture_id = 0
 
-# Динамические пути
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-CSV_FILE = os.path.join(CURRENT_DIR, 'dataset.csv')
-BUTTONS_FILE = os.path.join(CURRENT_DIR, 'buttons.json')
-BIN_PATH = os.path.join(CURRENT_DIR, 'imu_stream')
+CSV_FILE = os.path.abspath(os.path.join(CURRENT_DIR, '..', 'datasets', 'dataset.csv'))
+BUTTONS_FILE = os.path.abspath(os.path.join(CURRENT_DIR, '..', 'datasets', 'buttons.json'))
+BIN_PATH = os.path.abspath(os.path.join(CURRENT_DIR, '..', 'daemon', 'sensor_daemon'))
 
-# Базовые кнопки по умолчанию
+os.makedirs(os.path.dirname(CSV_FILE), exist_ok=True)
+
 default_buttons = {
-    "0": "Noise",
-    "1": "Telegram",
-    "2": "Spotify",
-    "3": "Circle"
+    "0": "Background"
 }
 
-# Загружаем кастомные кнопки
+# Загружаем кастомные кнопки  из файла
 def load_buttons():
     buttons = default_buttons.copy()
     if os.path.isfile(BUTTONS_FILE):
-        with open(BUTTONS_FILE, 'r') as f:
-            custom = json.load(f)
-            buttons.update(custom)
+        try:
+            with open(BUTTONS_FILE, 'r', encoding='utf-8') as f:
+                custom = json.load(f)
+                buttons.update(custom)
+        except Exception as e:
+            print(f"[WARN] Ошибка чтения {BUTTONS_FILE}: {e}")
+    else:
+        print(f"[WARN] Файл {BUTTONS_FILE} не найден. Используется только фон.")
     return buttons
 
 # Инициализация id жестов из csv
@@ -40,7 +42,6 @@ if os.path.isfile(CSV_FILE):
         for row in reader:
             if len(row) >= 8:
                 try:
-                    # Индекс 7 - это gesture_id
                     gid = int(float(row[7]))
                     if gid > max_id:
                         max_id = gid
@@ -60,12 +61,7 @@ HTML_UI = """
         .btn-record { background: #3498db; color: white; }
         .btn-save { background: #1e90ff; color: white; width: 40%; }
         .btn-cancel { background: #ff6b81; color: white; width: 40%; }
-        .btn-add { background: #9b59b6; color: white; height: 40px; font-size: 14px;}
         
-        input { height: 35px; font-size: 16px; text-align: center; border-radius: 8px; border: none; margin: 5px; }
-        .inp-id { width: 20%; }
-        .inp-name { width: 50%; }
-
         #status { font-size: 18px; margin: 10px; color: #eccc68; min-height: 25px; }
         #review-panel { display: none; margin-top: 10px; padding: 10px; background: #222; border-radius: 15px; }
         #controls { display: block; }
@@ -83,21 +79,13 @@ HTML_UI = """
         <div class="panel">
             <h3 style="margin-top:0;">Record Data</h3>
             <div id="buttons-container">
-                <!-- Dynamically populated buttons -->
+                
             </div>
         </div>
 
         <div class="panel">
             <h3 style="margin-top:0;">Dataset Stats</h3>
             <div class="stats-box" id="stats-box">Loading...</div>
-        </div>
-
-        <div class="panel">
-            <h3 style="margin-top:0;">Add New Button</h3>
-            <input type="number" id="new-id" class="inp-id" placeholder="ID (e.g. 4)">
-            <input type="text" id="new-name" class="inp-name" placeholder="Name (e.g. Triangle)">
-            <br>
-            <button class="btn btn-add" onclick="addNewButton()">Create Button</button>
         </div>
     </div>
 
@@ -113,7 +101,6 @@ HTML_UI = """
         let chartInstance = null;
         const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
-        // Загрузка кнопок и статистики при старте
         window.onload = () => {
             fetchButtons();
             fetchStats();
@@ -153,24 +140,6 @@ HTML_UI = """
                     html += `<hr style="border-color:#555">Total samples: <b>${total}</b>`;
                     box.innerHTML = html;
                 });
-        }
-
-        function addNewButton() {
-            const id = document.getElementById('new-id').value;
-            const name = document.getElementById('new-name').value;
-            if (!id || !name) {
-                alert("Provide both ID and Name.");
-                return;
-            }
-            fetch('/add_button', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({id: id, name: name})
-            }).then(() => {
-                document.getElementById('new-id').value = '';
-                document.getElementById('new-name').value = '';
-                fetchButtons();
-            });
         }
 
         function beep(freq, duration) {
@@ -230,7 +199,7 @@ HTML_UI = """
             .then(text => {
                 document.getElementById('status').innerText = text;
                 resetUI();
-                fetchStats(); // Update stats after saving
+                fetchStats(); 
             });
         }
 
@@ -278,27 +247,6 @@ def index():
 def get_buttons():
     return jsonify(load_buttons())
 
-@app.route('/add_button', methods=['POST'])
-def add_button():
-    data = request.json
-    btn_id = str(data['id'])
-    btn_name = data['name']
-    
-    # Читаем старые
-    buttons = {}
-    if os.path.isfile(BUTTONS_FILE):
-        with open(BUTTONS_FILE, 'r') as f:
-            buttons = json.load(f)
-    
-    # Добавляем новую
-    buttons[btn_id] = btn_name
-    
-    # Сохраняем
-    with open(BUTTONS_FILE, 'w') as f:
-        json.dump(buttons, f)
-        
-    return jsonify({"status": "ok"})
-
 @app.route('/stats')
 def get_stats():
     if not os.path.isfile(CSV_FILE):
@@ -307,7 +255,6 @@ def get_stats():
     stats = {}
     buttons = load_buttons()
     
-    # Читаем CSV и считаем уникальные gesture_id для каждого label
     with open(CSV_FILE, 'r') as f:
         reader = csv.DictReader(f)
         tracker = {}
@@ -349,7 +296,7 @@ def record_gesture(label):
                 break
     finally:
         process.terminate()
-        subprocess.run(['su', '-c', 'killall imu_stream'], capture_output=True)
+        subprocess.run(['su', '-c', 'killall sensor_daemon'], capture_output=True)
 
     return jsonify(collected_points)
 
